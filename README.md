@@ -69,9 +69,6 @@ For programmable design, synthesizable design, or 3D validity evaluation, downlo
 wget -P data/validity3d/ https://zenodo.org/records/22754501/files/ligands.sdf
 ```
 
-Distributions are compiled and cached beside the SDF on first use.
-
-
 ## Basic usage examples
 
 ### De novo design
@@ -199,7 +196,6 @@ itergen_params:
   reaction_path: data/chemical_spaces/custom/reactions.json
   building_blocks_path: data/chemical_spaces/custom/building_blocks.pkl
   reaction_to_compound_path: data/chemical_spaces/custom/reaction_to_building_blocks.pkl
-  reaction_path_enamine: null
 ```
 
 Run synthesizable design with the following command:
