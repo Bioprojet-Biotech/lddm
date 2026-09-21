@@ -2,7 +2,10 @@ __pycache__
 .idea
 .DS_Store
 .venv/
-checkpoints/
+
+# Pretrained weights (Zenodo); keep the directory after clone
+checkpoints/*
+!checkpoints/.gitkeep
 
 # Build artefacts
 dist/
