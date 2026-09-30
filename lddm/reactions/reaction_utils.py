@@ -67,54 +67,105 @@ def connect_synthons(
 ######################### Explicit reactions ########################
 #####################################################################
 
+def run_compiled_reaction(
+    rxn: rdChemReactions.ChemicalReaction,
+    reactant_mols: Collection[Chem.Mol],
+    explicit_hs: bool = False,
+) -> Collection[str] | None:
+    """Run a precompiled RDKit reaction on reactant mols; return unique product SMILES."""
+    mols = list(reactant_mols)
+    if not mols or rxn is None:
+        return None
+    prepared = []
+    for mol in mols:
+        if mol is None:
+            return None
+        prepared.append(Chem.AddHs(mol) if explicit_hs else Chem.Mol(mol))
+    try:
+        products = rxn.RunReactants(tuple(prepared))
+    except Exception:
+        return None
+
+    uniqps = {}
+    for p in products:
+        try:
+            smi = Chem.MolToSmiles(Chem.RemoveAllHs(p[0]))
+            uniqps[smi] = p[0]
+        except Exception:
+            continue
+    if not uniqps:
+        return None
+    return sorted(uniqps.keys())
+
+
+def run_reaction_smarts(
+    reaction_smarts: str,
+    reactant_smiles: Collection[str],
+    explicit_hs: bool = False,
+    compiled_rxn: rdChemReactions.ChemicalReaction | None = None,
+    reactant_mols: Collection[Chem.Mol] | None = None,
+) -> Collection[str] | None:
+    """Run a SMARTS reaction with 1–N reactant SMILES; return unique product SMILES.
+
+    Pass ``compiled_rxn`` / ``reactant_mols`` to avoid recompiling SMARTS or
+    re-parsing SMILES on hot paths (e.g. retrosynthesis forward verification).
+    """
+    if compiled_rxn is not None and reactant_mols is not None:
+        return run_compiled_reaction(compiled_rxn, reactant_mols, explicit_hs=explicit_hs)
+
+    smiles_list = list(reactant_smiles)
+    if not smiles_list:
+        return None
+    rxn = compiled_rxn
+    if rxn is None:
+        try:
+            rxn = rdChemReactions.ReactionFromSmarts(reaction_smarts)
+        except Exception:
+            return None
+    if rxn is None:
+        return None
+    if reactant_mols is not None:
+        return run_compiled_reaction(rxn, reactant_mols, explicit_hs=explicit_hs)
+    mols = []
+    for smi in smiles_list:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            return None
+        mols.append(mol)
+    return run_compiled_reaction(rxn, mols, explicit_hs=explicit_hs)
+
+
 def run_bimolecular_reaction_smarts(
     reaction_smarts: str,
     bb_smiles_x: str,
     bb_smiles_y: str,
     explicit_hs: bool = False
 ) -> Collection[str]:
-    rxn = rdChemReactions.ReactionFromSmarts(reaction_smarts)
-    bb_mol_x = Chem.MolFromSmiles(bb_smiles_x)
-    bb_mol_y = Chem.MolFromSmiles(bb_smiles_y)
-    reacts = (Chem.AddHs(bb_mol_x), Chem.AddHs(bb_mol_y)) if explicit_hs else (Chem.Mol(bb_mol_x), Chem.Mol(bb_mol_y))
-    products = rxn.RunReactants(reacts)
-    
-    uniqps = {}
-    for p in products:
-        try:
-            smi = Chem.MolToSmiles(Chem.RemoveAllHs(p[0]))
-            uniqps[smi] = p[0]
-        except Exception as e:
-            continue
-    if not uniqps:
-        logging.debug(f'Reaction failed with {bb_smiles_x} and {bb_smiles_y}, reaction: {reaction_smarts}')
-        return None
-    uniqps = sorted(uniqps.keys())
-    return uniqps
+    return run_reaction_smarts(
+        reaction_smarts, (bb_smiles_x, bb_smiles_y), explicit_hs=explicit_hs
+    )
+
 
 def run_unimolecular_reaction_smarts(
     reaction_smarts: str,
     bb_smiles: str,
     explicit_hs: bool = False
 ) -> Collection[str]:
-    rxn = rdChemReactions.ReactionFromSmarts(reaction_smarts)
-    bb_mol = Chem.MolFromSmiles(bb_smiles)
-    reacts = (Chem.AddHs(bb_mol) if explicit_hs else Chem.Mol(bb_mol),)
-    products = rxn.RunReactants(reacts)
+    return run_reaction_smarts(reaction_smarts, (bb_smiles,), explicit_hs=explicit_hs)
 
-    uniqps = {}
-    for p in products:
-        try:
-            smi = Chem.MolToSmiles(Chem.RemoveAllHs(p[0]))
-        except Exception as e:
-            continue
-        uniqps[smi] = p[0]
-    if not uniqps:
-        logging.debug(f'Reaction failed with {bb_smiles}, reaction: {reaction_smarts}')
-        return None
-    
-    uniqps = sorted(uniqps.keys())
-    return uniqps
+
+def run_trimolecular_reaction_smarts(
+    reaction_smarts: str,
+    bb_smiles_x: str,
+    bb_smiles_y: str,
+    bb_smiles_z: str,
+    explicit_hs: bool = False,
+) -> Collection[str]:
+    return run_reaction_smarts(
+        reaction_smarts,
+        (bb_smiles_x, bb_smiles_y, bb_smiles_z),
+        explicit_hs=explicit_hs,
+    )
 
 
 class ReactionTree:
@@ -131,7 +182,11 @@ class ReactionTree:
             educts_part, react_id, product_part = None, None, inner
         else:
             educts_part, react_id, product_part = inner.rsplit(':', 2)
-        product, prod_id = product_part.split('-', 1) if '-' in product_part else (product_part, None)
+        # SMILES may contain '-' (branches); id is always the suffix after the last '-'.
+        if '-' in product_part:
+            product, prod_id = product_part.rsplit('-', 1)
+        else:
+            product, prod_id = product_part, None
         if product == 'NA':
             product = None
         if prod_id == 'NA':
@@ -168,34 +223,69 @@ class ReactionTree:
             return 1 + max(d(e) for e in eds)
         return d(self.tree)
 
-    def draw(self):
+    def reaction_steps(self) -> list[dict]:
+        """Bottom-up reaction steps: reactants → product with react_id.
+
+        Each step is ``{'reactants': [smiles, ...], 'product': smiles, 'react_id': str}``.
+        Building-block leaves are omitted.
+        """
+        steps: list[dict] = []
+
+        def collect(n: dict) -> None:
+            eds = n.get('educts') or []
+            for e in eds:
+                collect(e)
+            if eds:
+                reactants = [e.get('product') for e in eds]
+                if any(r is None for r in reactants) or n.get('product') is None:
+                    return
+                steps.append(
+                    {
+                        'reactants': reactants,
+                        'product': n['product'],
+                        'react_id': n.get('react_id') or '?',
+                    }
+                )
+
+        collect(self.tree)
+        return steps
+
+    def draw(self, output_path: str | None = None, show: bool = True):
+        """Render reaction steps.
+
+        Prefer Cairo/PNG via ``lddm.reactions.render_pathways`` when saving.
+        Falls back to matplotlib only for interactive ``show=True`` without a path.
+        """
+        if output_path is not None:
+            from lddm.reactions.render_pathways import render_react_trace
+
+            render_react_trace(self.react_trace, output_path)
+            return
+        if not show:
+            return
         import matplotlib.pyplot as plt
 
-        steps = []
-        def collect(n):
-            eds = n.get('educts') or []
-            if eds:
-                steps.append(( [e['product'] for e in eds], n['product'], n.get('react_id') ))
-                for e in eds:
-                    collect(e)
-        collect(self.tree)
-        for i, (educt_smiles, product_smiles, rid) in enumerate(steps,1):
-            ed_mols = [Chem.MolFromSmiles(s) for s in educt_smiles]
-            prod_mol = Chem.MolFromSmiles(product_smiles)
+        steps = self.reaction_steps()
+        for i, step in enumerate(steps, 1):
+            ed_mols = [Chem.MolFromSmiles(s) for s in step['reactants']]
+            prod_mol = Chem.MolFromSmiles(step['product'])
             n = len(ed_mols)
-            fig, axs = plt.subplots(1, n+2, figsize=(4*(n+2),4))
+            fig, axs = plt.subplots(1, n + 2, figsize=(4 * (n + 2), 4))
+            if n + 2 == 1:
+                axs = [axs]
             for j, mol in enumerate(ed_mols):
-                axs[j].imshow(Draw.MolToImage(mol, size=(300,300)))
+                axs[j].imshow(Draw.MolToImage(mol, size=(300, 300)))
                 axs[j].axis('off')
-                axs[j].set_title(f"Educt {j+1}")
-            axs[n].text(0.5,0.5,'→',fontsize=40,ha='center',va='center')
+                axs[j].set_title(f'Educt {j + 1}')
+            axs[n].text(0.5, 0.5, '→', fontsize=40, ha='center', va='center')
             axs[n].axis('off')
-            axs[n+1].imshow(Draw.MolToImage(prod_mol, size=(300,300)))
-            axs[n+1].axis('off')
-            axs[n+1].set_title("Product")
-            plt.suptitle(f"Step {i} (ID: {rid})")
+            axs[n + 1].imshow(Draw.MolToImage(prod_mol, size=(300, 300)))
+            axs[n + 1].axis('off')
+            axs[n + 1].set_title('Product')
+            plt.suptitle(f"Step {i} (ID: {step['react_id']})")
             plt.tight_layout()
             plt.show()
+
 
 def get_react_trace_building_block(smi, id=None):
     if smi is None:
@@ -205,8 +295,6 @@ def get_react_trace_building_block(smi, id=None):
     return f'<{smi}-{id}>'
 
 def get_react_trace_unimolecular(tr, reaction_id, product_smi, prod_id=None):
-    if id is None:
-        id = 'NA'
     if prod_id is None:
         prod_id = 'NA'
     return f'<{tr}:{reaction_id}:{product_smi}-{prod_id}>'

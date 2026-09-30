@@ -92,6 +92,12 @@ python scripts/sample.py design \
     --output examples/grown_samples.sdf
 ```
 
+For **synthesizable** fragment-based design (grow a fixed fragment inside a
+virtual chemical space), use the programmable interface with
+`starting_fragments` and `synthesizable: true` — see
+[Synthesizable design](#synthesizable-design) below and
+`configs/controlled_generation/synthesizable_fragment_design.yml`.
+
 ### Docking
 
 ```bash
@@ -185,6 +191,45 @@ python scripts/prepare_chemical_space.py \
     --output data/chemical_spaces/custom
 ```
 
+To expand the demo SynSpace with [ReaSyn](https://github.com/NVIDIA-Digital-Bio/reasyn) /
+[SynFormer](https://github.com/wenhao-gao/synformer/tree/main/data/rxn_templates)
+building blocks and reaction templates, fuse them first (uni- and tri-molecular
+ReaSyn templates are dropped from forward `reactions.json`; retrosynthesis keeps
+uni/bi/tri in `reactions_retrosynthesis.json`). Building blocks are **deduped by
+canonical SMILES** with a single preferred primary provider
+(`synspace` > `enamine` > `molport` > `mcule` > `reasyn`) while all origins are
+kept in a `sources` column (`provider:id;…`):
+
+```bash
+python scripts/fuse_chemical_spaces.py \
+    --current-building-blocks data/synspace/building_blocks.csv \
+    --current-reactions data/synspace/reactions.json \
+    --reasyn-building-blocks path/to/building_blocks.txt \
+    --reasyn-reactions path/to/comprehensive.txt \
+    --output data/chemical_spaces/synspace_reasyn \
+    --skip-invalid-bbs \
+    --prepare
+```
+
+To broaden buyable coverage further with [Mcule purchasable building
+blocks](https://mcule.com/database/) (same priority-aware dedup):
+
+```bash
+python scripts/expand_bb_catalog.py \
+    --base-building-blocks data/chemical_spaces/synspace_reasyn/building_blocks.csv \
+    --base-reactions data/chemical_spaces/synspace_reasyn/reactions.json \
+    --download-mcule \
+    --max-mcule-bbs 200000 \
+    --output data/chemical_spaces/synspace_reasyn_mcule \
+    --prepare --drop-empty-roles
+```
+
+Omit `--max-mcule-bbs` for the full Mcule dump (~millions of BBs; prepare is
+expensive). Then synthesize with
+`configs/controlled_generation/synthesize_synspace_reasyn_mcule.yml`. Route CSV
+columns include `building_block_providers`, `building_block_sources`, and
+`bb_priority` (lower is better).
+
 The script validates the molecules, computes fingerprints, and assigns blocks to
 reaction roles by SMARTS matching. To preserve curated assignments, add
 `--memberships path/to/memberships.csv` with columns `reaction_id`, `reactant_role`
@@ -206,6 +251,127 @@ python scripts/generate_programmable_design.py configs/controlled_generation/syn
 
 Estimated runtime: **21 minutes** for the default KRAS example on one NVIDIA H100 with four CPU cores.
 
+To grow from a fixed starting fragment instead of designing de novo, set
+`starting_fragments` (or pass `--starting_fragments`) to an SDF whose molecule
+matches a reactant role in your chemical space:
+
+```bash
+python scripts/generate_programmable_design.py \
+    configs/controlled_generation/synthesizable_fragment_design.yml
+```
+
+### Retrosynthesis (synthesize mode)
+
+Given query SMILES, recover **multi-step** synthesis pathways by reversing the
+same local reaction templates until every leaf is a catalog building block
+(SynSpace, fused SynSpace+ReaSyn, or a custom space from
+`prepare_chemical_space.py`). The search uses forward-verified reverse SMARTS
+for **uni-, bi-, and trimolecular** single-product templates (retrosynthesis is
+not limited to LDDM’s bimolecular forward-generation constraint), aromatic
+C–hetero cuts, explicit-halogen reverse variants, charge/salt normalization,
+buyable-first beam expansion, iterative deepening, and BB-substructure pair
+recovery when templates alone are too noisy.
+
+By default, reverse-proposed **halide / small alcohol–thiol partners** missing
+from the catalog are accepted as leaves (`building_block_ids` tagged
+`proposed__…`). Pass `--no-proposed-reagents` for strict catalog-only membership.
+
+```bash
+python scripts/synthesize.py configs/controlled_generation/synthesize.yml \
+    --smiles 'CC1(NC(=O)C2CC2)CC1' \
+    --output output/synthesize_pathways.csv
+```
+
+For the fused SynSpace + ReaSyn space (uni/bi/tri retrosynthesis templates in
+`reactions_retrosynthesis.json`; bimolecular `reactions.json` still used for
+forward synthesizable design):
+
+```bash
+python scripts/synthesize.py configs/controlled_generation/synthesize_synspace_reasyn.yml \
+    --input molecules.smi \
+    --max-depth 5 \
+    --n-workers 4 \
+    --output output/synthesize_pathways.csv
+```
+
+Or pass a `.smi` / `.csv` file with `--input`. For large batches, `--n-workers`
+runs molecules in a process pool; `--stream-output` writes CSV rows
+incrementally; `--disconnect-cache PATH` reuses ranked disconnections across
+runs. A prepared building-block sidecar (`*.pkl.prepared.pkl`) is written on
+first load to speed cold starts.
+
+Output columns include `react_trace` (compatible with synthesizable design;
+uni/tri use the matching trace helpers) and a human-readable `pathway`.
+
+To keep **near-miss** constructions (forward product close but not identical to
+the query), enable approximate mode with a Tanimoto threshold:
+
+```bash
+python scripts/synthesize.py configs/controlled_generation/synthesize.yml \
+    --smiles 'CC1(NC(=O)C2CC2)CC1' \
+    --approximate \
+    --similarity-threshold 0.7 \
+    --output output/synthesize_approx.csv
+```
+
+Exact routes are preferred when available. Approximate hits report `exact=false`,
+`similarity`, and `reconstructed_smiles` (the molecule the route actually builds).
+
+### Benchmark reconstruction quality (SynFormer / ReaSyn test sets)
+
+Primary metrics match ReaSyn’s reconstruction eval
+([`eval_recon.py`](https://github.com/NVIDIA-Digital-Bio/reasyn/blob/main/scripts/eval_recon.py)):
+does a returned pathway **forward-replay** to the query?
+
+| Metric | Meaning |
+|--------|---------|
+| `success_rate` | Any pathway returned |
+| `reconstruction_rate` | Every step fires under recorded SMARTS **and** product == searched SMILES |
+| `catalog_route_rate` | Reconstruction using only catalog BBs (no `proposed__`) |
+| `forward_valid_rate` | Steps verify even if product is only a near-miss |
+
+```bash
+# Search + quality on ReaSyn ZINC-1k
+python scripts/benchmark_retrosynthesis.py \
+    configs/controlled_generation/synthesize_synspace_reasyn.yml \
+    --testset zinc --limit 50 --n-workers 4 --render \
+    --output output/benchmark_zinc50
+
+# Re-score an existing CSV (no re-search)
+python scripts/benchmark_retrosynthesis.py \
+    configs/controlled_generation/synthesize_synspace_reasyn.yml \
+    --eval-csv output/benchmark_zinc50/benchmark_routes.csv \
+    --output output/benchmark_zinc50_eval
+
+# SynFormer Enamine / ChEMBL 1k (downloaded into data/benchmarks/)
+python scripts/benchmark_retrosynthesis.py \
+    configs/controlled_generation/synthesize_synspace_reasyn.yml \
+    --testset enamine --limit 100 --n-workers 4 \
+    --output output/benchmark_enamine100
+```
+
+Render an existing `synthesize.py` CSV:
+
+```bash
+# PNG panels + index.html (external images)
+python scripts/render_synthesize_pathways.py output/synthesize_pathways.csv \
+    -o output/rendered_pathways --top-k 1
+
+# Chemist-facing single-file HTML (all SVG drawings embedded inline)
+python scripts/render_synthesize_pathways.py output/synthesize_pathways.csv \
+    --embedded -o output/retrosynthesis_report.html --top-k 3
+```
+
+Open `…/rendered/index.html` or the embedded `.html` offline (no external assets).
+Reaction JSON catalogs expose SMARTS / name / optional source — **not** experimental
+yields or lab conditions
+([ReaSyn](https://github.com/MolecularAI/ReaSyn) /
+[SynFormer templates](https://github.com/wenhao-gao/synformer/tree/main/data/rxn_templates)).
+
+Docs for reaction templates:
+[https://github.com/MolecularAI/ReaSyn](https://github.com/MolecularAI/ReaSyn) /
+[SynFormer templates](https://github.com/wenhao-gao/synformer/tree/main/data/rxn_templates)
+and SynSpace reactions under `data/synspace/`.
 <!-- ## Citing this work
 
 TODO -->

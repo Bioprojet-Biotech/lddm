@@ -23,7 +23,10 @@ def main():
     p.add_argument('config', type=str, help='Path to the YAML configuration file for controlled sampling')
     
     p.add_argument('--synthesizable', action='store_true', default=None, help='Use synthesizable sampling')
-    p.add_argument('--starting_fragments', type=str, help='Starting fragments for iterative sampling')
+    p.add_argument('--starting_fragments', type=str,
+                   help='Starting fragment SDF for iterative sampling '
+                        '(fragment-based / fragment growing). Compatible with '
+                        'both programmable and synthesizable modes.')
     p.add_argument('--save_all', action='store_true', default=None, help='Save all intermediate steps')
     p.add_argument('--verbose', action='store_true', default=None, help='Verbose logging')
     args = p.parse_args()

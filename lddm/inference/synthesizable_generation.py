@@ -89,11 +89,29 @@ class SynthesizableGeneration(ProgrammableGeneration):
             self.docking_sampler = getattr(samplers, docking_params.sampler)(self.model)
 
     def setup_input(self, ligand_p, pocket_p, starting_frag_p=None):
-        assert starting_frag_p is None, 'Starting fragments are not supported for synthesizable sampling'
-        super().setup_input(ligand_p, pocket_p)
+        super().setup_input(ligand_p, pocket_p, starting_frag_p=starting_frag_p)
 
         self.fragment_tree = SynthonTree(self.fragment_tree.root.mol)
+        root = self.fragment_tree.root
+        if root.mol is not None:
+            # Seed the starting fragment as a building-block-like node so
+            # reaction expansion can attach partners from the chemical space.
+            if root.react_trace is None:
+                root.react_trace = get_react_trace_building_block(root.synthon_smiles)
+            if root.completed is None:
+                root.completed = False
+            logging.info(
+                f'Synthesizable fragment-based design from '
+                f'{root.smiles} (react_trace={root.react_trace})'
+            )
         self.run_reactions()
+        if root.mol is not None and (root.is_terminal or len(root.product_set) == 0):
+            raise ValueError(
+                f'Starting fragment {root.smiles} produced no reaction products '
+                f'in the configured chemical space. Choose a fragment that matches '
+                f'a reactant role (custom reactions) or exists in the synthon '
+                f'database (Enamine).'
+            )
 
     def setup_evaluators(self, itergen_params):
         super().setup_evaluators(itergen_params)
@@ -214,8 +232,17 @@ class SynthesizableGeneration(ProgrammableGeneration):
             node.product_set['checked'] = node.product_set['checked'].astype(bool).fillna(False)
             prod_set_to_check = node.product_set.loc[~node.product_set['checked']]
             if len(prod_set_to_check) == 0: continue
-            assert node.parent is not None, \
-                'Root node needs to be initialized before checking reaction products'
+            # Seeded root (starting_fragments): products are already reaction
+            # partners of the seed synthon. Mark them checked — parent rewiring
+            # only applies to non-root expansion nodes. Empty-root de novo
+            # marking is handled earlier in run_reactions().
+            if node.parent is None:
+                if node.mol is None:
+                    raise AssertionError(
+                        'Root node needs to be initialized before checking reaction products'
+                    )
+                node.product_set.loc[prod_set_to_check.index, 'checked'] = True
+                continue
             for _, prod_set in prod_set_to_check.groupby('smiles'):
                 product = prod_set.iloc[0]
                 # find mcs
