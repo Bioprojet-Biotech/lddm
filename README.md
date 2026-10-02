@@ -291,14 +291,24 @@ python scripts/synthesize.py configs/controlled_generation/synthesize_synspace_r
     --input molecules.smi \
     --max-depth 5 \
     --n-workers 4 \
-    --output output/synthesize_pathways.csv
+    --output output/synthesize_pathways.csv \
+    --html output/synthesize_pathways.html
 ```
+
+Procedure enrichment is **on by default** when
+`data/procedures/named_reaction_procedures.json` exists: each route row gains
+`procedures` (JSON), `procedure_match_levels`, and `procedure_titles` from the
+curated KB + local [OpenAlex](https://developers.openalex.org/) prepared cache
+(`data/openalex/prepared/`). Pass `--no-enrich-procedures` to skip. Use `--html`
+to write an embedded report with procedure panels in one step.
 
 Or pass a `.smi` / `.csv` file with `--input`. For large batches, `--n-workers`
 runs molecules in a process pool; `--stream-output` writes CSV rows
 incrementally; `--disconnect-cache PATH` reuses ranked disconnections across
 runs. A prepared building-block sidecar (`*.pkl.prepared.pkl`) is written on
-first load to speed cold starts.
+first load to speed cold starts. Build a compiled reaction pack + feature index
+with `scripts/prepare_retrosynthesis_pack.py`, then seed the disconnect cache
+from benchmarks / Murcko scaffolds via `scripts/seed_disconnect_cache.py`.
 
 Output columns include `react_trace` (compatible with synthesizable design;
 uni/tri use the matching trace helpers) and a human-readable `pathway`.
@@ -367,6 +377,39 @@ Reaction JSON catalogs expose SMARTS / name / optional source — **not** experi
 yields or lab conditions
 ([ReaSyn](https://github.com/MolecularAI/ReaSyn) /
 [SynFormer templates](https://github.com/wenhao-gao/synformer/tree/main/data/rxn_templates)).
+
+### Procedure enrichment + OpenAlex (offline)
+
+After a route CSV exists, attach **curated procedure cards** (solvent / T / stoich /
+workup / typical yield ranges) and **local literature refs** from a prepared
+[OpenAlex](https://developers.openalex.org/) cache. Runtime enrichment never
+calls the network.
+
+```bash
+# 1) Download query-scoped works (not the full multi-hundred-GB S3 dump)
+#    https://developers.openalex.org/download/download-to-machine
+export OPENALEX_MAILTO=you@org.com
+python scripts/download_openalex_dataset.py --mailto "$OPENALEX_MAILTO"
+
+# 2) Normalize into data/openalex/prepared/ (openalex_refs.json, reaction_index.json)
+python scripts/prepare_openalex_dataset.py
+
+# 3) Literature-driven coverage vs synspace_reasyn retro templates + BB role map
+python scripts/analyze_reaction_coverage.py
+# → data/chemical_spaces/synspace_reasyn/reaction_coverage_report.{json,md}
+
+# 4) Enrich a synthesize / benchmark CSV (JSON + optional embedded HTML)
+python scripts/enrich_synthesize_pathways.py \
+    --csv output/synthesize_pathways.csv \
+    --out output/enriched_pathways.json \
+    --html output/enriched_retrosynthesis.html \
+    --top-k 3
+```
+
+Vocab: `data/openalex/named_reaction_vocab.json`. Curated cards:
+`data/procedures/named_reaction_procedures.json`. Prepared refs are small enough
+to keep under `data/openalex/prepared/`; raw JSONL under `data/openalex/raw/` is
+gitignored and regenerable.
 
 Docs for reaction templates:
 [https://github.com/MolecularAI/ReaSyn](https://github.com/MolecularAI/ReaSyn) /

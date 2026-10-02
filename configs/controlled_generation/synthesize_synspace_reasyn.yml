@@ -1,0 +1,43 @@
+# Local retrosynthesis against fused SynSpace + ReaSyn chemical space.
+# Provide query molecules via --smiles / --input (CLI overrides this file).
+# Default SynSpace-only config: synthesize.yml
+#
+# reactions_retrosynthesis.json keeps uni-/bi-/trimolecular single-product
+# templates (not limited to LDDM forward bimolecular constraint). Prepared
+# BB/role PKLs remain bimolecular for synthesizable design.
+output: output/synthesize_pathways_synspace_reasyn.csv
+reaction_path: data/chemical_spaces/synspace_reasyn/reactions_retrosynthesis.json
+building_blocks_path: data/chemical_spaces/synspace_reasyn/building_blocks.pkl
+reaction_to_compound_path: data/chemical_spaces/synspace_reasyn/reaction_to_building_blocks.pkl
+max_depth: 5
+max_routes_per_mol: 10
+max_disconnections: 64
+require_role_membership: true
+# Accept reverse-proposed aryl/alkyl halide leaves missing from the catalog
+# (tagged proposed__* in building_block_ids). Disable for strict SynSpace membership.
+allow_proposed_reagents: true
+max_proposed_reagent_atoms: 16
+seed_trivial_catalog: true
+# Force ChargeParent/Uncharger before search; score Tanimoto vs original (may be <1).
+force_uncharge: true
+# Replace O–O with ether oxygen, then synthesize the simplified analog.
+simplify_peroxides: true
+peroxide_mode: ether
+# Minimum Tanimoto(original, reconstructed) when a transform was applied.
+transform_similarity_threshold: 0.7
+# Skip max_depth when query is junk / has no templates / no shallow progress.
+early_skip: true
+early_skip_junk_chem: true
+early_skip_exclude_reactions:
+  - retro_cc_wurtz
+early_skip_min_useful_discs: 1
+n_workers: 4
+approximate: false
+# Persist ranked disconnections across runs (seed with scripts/seed_disconnect_cache.py).
+disconnect_cache: data/chemical_spaces/synspace_reasyn/disconnect_cache.pkl
+# Compiled reverse SMARTS + feature→reaction index (scripts/prepare_retrosynthesis_pack.py).
+reaction_pack: data/chemical_spaces/synspace_reasyn/retrosynthesis_pack.pkl
+# Offline procedure cards + local OpenAlex refs on CSV (and --html if set).
+enrich_procedures: true
+procedure_kb: data/procedures/named_reaction_procedures.json
+openalex_prepared_dir: data/openalex/prepared

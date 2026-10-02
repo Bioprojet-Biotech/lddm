@@ -18,3 +18,8 @@ data/validity3d/
 # Downloaded or locally prepared chemical spaces
 data/synspace/
 data/chemical_spaces/
+
+# OpenAlex raw works JSONL (regenerate via scripts/download_openalex_dataset.py)
+data/openalex/raw/
+output/
+data/

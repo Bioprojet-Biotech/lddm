@@ -1,0 +1,29 @@
+# Local retrosynthesis against the SynSpace chemical space.
+# Provide query molecules via --smiles / --input (CLI overrides this file).
+output: output/synthesize_pathways.csv
+reaction_path: data/synspace/reactions.json
+building_blocks_path: data/synspace/building_blocks.pkl
+reaction_to_compound_path: data/synspace/reaction_to_building_blocks.pkl
+max_depth: 5
+max_routes_per_mol: 10
+require_role_membership: true
+allow_proposed_reagents: true
+max_proposed_reagent_atoms: 16
+# Parallel multi-molecule retrosynthesis (process pool).
+n_workers: 4
+# Skip max_depth when query is junk / has no templates / no shallow progress.
+early_skip: true
+early_skip_junk_chem: true
+early_skip_exclude_reactions:
+  - retro_cc_wurtz
+early_skip_min_useful_discs: 1
+# Set approximate: true (and optionally similarity_threshold) to keep near-miss routes.
+approximate: false
+# similarity_threshold: 0.7
+# Offline procedure cards + local OpenAlex refs (default on if KB present).
+enrich_procedures: true
+procedure_kb: data/procedures/named_reaction_procedures.json
+openalex_prepared_dir: data/openalex/prepared
+# Persist ranked disconnections across runs (seed with scripts/seed_disconnect_cache.py).
+disconnect_cache: output/synthesize_disconnect_cache.pkl
+# stream_output: false

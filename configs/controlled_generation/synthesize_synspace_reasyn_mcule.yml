@@ -1,0 +1,39 @@
+# Local retrosynthesis against SynSpace + ReaSyn + Mcule purchasable BBs.
+# Build the space first (cap Mcule rows until you can afford a full prepare):
+#
+#   python scripts/expand_bb_catalog.py \
+#       --base-building-blocks data/chemical_spaces/synspace_reasyn/building_blocks.csv \
+#       --base-reactions data/chemical_spaces/synspace_reasyn/reactions.json \
+#       --download-mcule --max-mcule-bbs 200000 \
+#       --output data/chemical_spaces/synspace_reasyn_mcule \
+#       --prepare --drop-empty-roles
+#
+# Mcule catalog: https://mcule.com/database/
+# Multi-source BBs keep a single primary provider (priority order) and record
+# all origins in building_blocks.csv ``sources``. Retrosynthesis ranks routes
+# by provider priority (synspace < enamine < molport < mcule < reasyn).
+output: output/synthesize_pathways_synspace_reasyn_mcule.csv
+reaction_path: data/chemical_spaces/synspace_reasyn_mcule/reactions_retrosynthesis.json
+building_blocks_path: data/chemical_spaces/synspace_reasyn_mcule/building_blocks.pkl
+reaction_to_compound_path: data/chemical_spaces/synspace_reasyn_mcule/reaction_to_building_blocks.pkl
+max_depth: 5
+max_routes_per_mol: 10
+max_disconnections: 64
+require_role_membership: true
+allow_proposed_reagents: true
+max_proposed_reagent_atoms: 16
+seed_trivial_catalog: true
+force_uncharge: true
+simplify_peroxides: true
+peroxide_mode: ether
+transform_similarity_threshold: 0.7
+n_workers: 4
+approximate: false
+disconnect_cache: data/chemical_spaces/synspace_reasyn_mcule/disconnect_cache.pkl
+reaction_pack: data/chemical_spaces/synspace_reasyn_mcule/retrosynthesis_pack.pkl
+# Skip max_depth when query is junk / has no templates / no shallow progress.
+early_skip: true
+early_skip_junk_chem: true
+early_skip_exclude_reactions:
+  - retro_cc_wurtz
+early_skip_min_useful_discs: 1
