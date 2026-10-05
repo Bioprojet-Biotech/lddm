@@ -52,13 +52,18 @@ _SHARED_DISCONNECT_CACHE = None
 _OH_SH_QUERY = Chem.MolFromSmarts('[OH,SH]')
 _SS_QUERY = Chem.MolFromSmarts('[#16]-[#16]')
 _IMINE_QUERY = Chem.MolFromSmarts('[C,c]=[N,n]')
+_ALDEHYDE_QUERY = Chem.MolFromSmarts('[CH]=O')
+_ISOCYANATE_QUERY = Chem.MolFromSmarts('[N]=C=O')
 _HETEROARENE_QUERY = Chem.MolFromSmarts('a1aaaaa1')  # 6-member heteroaryl approx via aromatic
+_MAX_REVERSE_OUTCOMES = 24
 
 # Early-skip junk chemistry (denovo artifacts that burn deep search).
 _CUMULENE_QUERY = Chem.MolFromSmarts('[#6]=[#6]=[#6]')
 _WEIRD_S_QUERY = Chem.MolFromSmarts('[S;X3,X4]([#8;X2])([#8;X2])')
 _SULFONE_QUERY = Chem.MolFromSmarts('[S](=O)(=O)')
 _DEFAULT_EARLY_SKIP_EXCLUDE_REACTIONS = ('retro_cc_wurtz',)
+# Bump when disconnect ranking / BB-fallback policy changes (invalidates cache).
+_DISCONNECT_POLICY_VERSION = 'v2-rank-skip-bb-fallback'
 
 # Common small reagents often absent from ZINC BB dumps but needed as leaves.
 _TRIVIAL_CATALOG_SMILES: Tuple[str, ...] = (
@@ -847,6 +852,7 @@ class LocalRetrosynthesizer:
         self._reaction_order: List[str] = []
         self._use_feature_index: bool = False
         self._mol_feature_cache: Dict[str, Tuple[str, ...]] = {}
+        self._proposed_cache: Dict[str, bool] = {}
 
         self._load_chemical_space()
         self._load_disconnect_cache()
@@ -983,7 +989,9 @@ class LocalRetrosynthesizer:
             fp = hashlib.sha256(
                 (fp + '|' + _file_fingerprint(self.reaction_pack_path)).encode()
             ).hexdigest()
-        return fp
+        return hashlib.sha256(
+            f'{fp}|{_DISCONNECT_POLICY_VERSION}'.encode()
+        ).hexdigest()
 
     def _load_disconnect_cache(self) -> None:
         if self.disconnect_cache_path is None or not self.disconnect_cache_path.is_file():
@@ -1579,6 +1587,8 @@ class LocalRetrosynthesizer:
                 except Exception as e:
                     logging.debug(f'Reverse reaction {reaction_id} failed on {smiles}: {e}')
                     continue
+                if len(outcomes) > _MAX_REVERSE_OUTCOMES:
+                    outcomes = outcomes[:_MAX_REVERSE_OUTCOMES]
                 for outcome in outcomes:
                     if len(outcome) != n_expected:
                         continue
@@ -1627,15 +1637,16 @@ class LocalRetrosynthesizer:
 
         rxn_sets = self.reverse_rxns[reaction_id]
         product_query = info.get('product_query')
-        pairs: List[Tuple[Tuple[str, ...], str, float]] = []
-        if (
+        query_ok = (
             self.approximate
             or product_query is None
             or base_mol.HasSubstructMatch(product_query)
-        ):
+        )
+        pairs: List[Tuple[Tuple[str, ...], str, float]] = []
+        if query_ok:
             pairs = _run(rxn_sets['primary'])
-        if not pairs:
-            pairs = _run(rxn_sets['fallback'])
+            if not pairs:
+                pairs = _run(rxn_sets['fallback'])
         return pairs
 
     def _membership_ok(self, reaction_id: str, precursors: Sequence[str]) -> bool:
@@ -1659,6 +1670,14 @@ class LocalRetrosynthesizer:
 
     def _is_proposed_reagent(self, smiles: str) -> bool:
         """Non-catalog electrophile / small nucleophile acceptable as a leaf."""
+        cached = self._proposed_cache.get(smiles)
+        if cached is not None:
+            return cached
+        ok = self._is_proposed_reagent_uncached(smiles)
+        self._proposed_cache[smiles] = ok
+        return ok
+
+    def _is_proposed_reagent_uncached(self, smiles: str) -> bool:
         if not self.allow_proposed_reagents:
             return False
         if smiles in self.bb_smi_to_id:
@@ -1675,13 +1694,10 @@ class LocalRetrosynthesizer:
         # Small alcohols / thiols (ether & thioether partners often absent from ZINC BB sets).
         if n <= 12 and _OH_SH_QUERY is not None and mol.HasSubstructMatch(_OH_SH_QUERY):
             return True
-        # Small aldehydes (imine partners).
-        if n <= 12 and mol.HasSubstructMatch(Chem.MolFromSmarts('[CH]=O')):
+        if n <= 12 and _ALDEHYDE_QUERY is not None and mol.HasSubstructMatch(_ALDEHYDE_QUERY):
             return True
-        # Isocyanates from cyclic-urea opens (intramolecular NCO + amine).
-        if mol.HasSubstructMatch(Chem.MolFromSmarts('[N]=C=O')):
+        if _ISOCYANATE_QUERY is not None and mol.HasSubstructMatch(_ISOCYANATE_QUERY):
             return True
-        # Tiny heteroarenes (pyridine etc.) when not already trivial-seeded.
         if n <= 8 and mol.GetNumHeavyAtoms() <= 8:
             aromatic = sum(1 for a in mol.GetAtoms() if a.GetIsAromatic())
             if aromatic >= 5:
@@ -1815,14 +1831,28 @@ class LocalRetrosynthesizer:
         product_smi: str,
         similarity: float,
     ) -> _Disconnect:
-        buy_flags = [
-            int(s in self.bb_smi_to_id or self._is_proposed_reagent(s)) for s in precursors
+        catalog_flags = [int(s in self.bb_smi_to_id) for s in precursors]
+        proposed_flags = [
+            int(s not in self.bb_smi_to_id and self._is_proposed_reagent(s))
+            for s in precursors
         ]
+        buy_flags = [c or p for c, p in zip(catalog_flags, proposed_flags)]
         n_buy = sum(buy_flags)
+        n_catalog = sum(catalog_flags)
+        n_proposed = sum(proposed_flags)
         sizes = [self._cached_atom_count(s) for s in precursors]
         leftover = sum(sz for sz, b in zip(sizes, buy_flags) if not b)
         balance = (max(sizes) - min(sizes)) if sizes else 0
         exact = int(similarity >= 1.0 - 1e-12)
+        excluded = int(reaction_id in self.early_skip_exclude_reactions)
+        # Methyl / ethyl / isopropyl ether chops leave a near-parent core and
+        # a tiny catalog halide — expand ring/scaffold cuts first.
+        terminal_cut = int(
+            sizes
+            and min(sizes) <= 3
+            and max(sizes) >= parent_atoms - 3
+        )
+        tiny_unsolved = int(sizes and min(sizes) <= 2 and leftover > 8)
         # Prefer better-priority catalog BBs among buyable precursors.
         buy_priority = sum(
             self._precursor_priority(s) for s, b in zip(precursors, buy_flags) if b
@@ -1844,12 +1874,17 @@ class LocalRetrosynthesizer:
             if thiols_ok:
                 ss_cut = 1
         sort_key = (
+            excluded,
+            tiny_unsolved,
+            terminal_cut,
+            leftover,
+            n_proposed,
+            -n_catalog,
             -exact,
             -ss_cut,
             -similarity,
             -n_buy,
             buy_priority,
-            leftover,
             balance,
             -(parent_atoms - max(sizes, default=0)),
             len(precursors),
@@ -2032,12 +2067,12 @@ class LocalRetrosynthesizer:
             info = self.reactions[reaction_id]
             # Skip primary-impossible reactions early when not approximate;
             # _apply_reverse still runs fallbacks when primary product_query fails.
+            pq = info.get('product_query')
             if (
                 not self.approximate
                 and prod is not None
-                and info.get('product_query') is not None
-                and not self.reverse_rxns[reaction_id]['fallback']
-                and not prod.HasSubstructMatch(info['product_query'])
+                and pq is not None
+                and not prod.HasSubstructMatch(pq)
             ):
                 continue
             for precursors, product_smi, sim in self._apply_reverse(reaction_id, smiles):
@@ -2048,9 +2083,10 @@ class LocalRetrosynthesizer:
                         reaction_id, precursors, parent_atoms, product_smi, sim
                     )
                 )
-        # Exact 1-step BB+BB recovery when reverse found no fully buyable cut.
-        buyable_before = sum(1 for d in ranked if d.sort_key[3] <= -2)
-        if buyable_before == 0:
+        # Catalog BB-pair recovery only when reverse SMARTS found nothing.
+        # Leave-one-out over 80k BBs dominates fused-ring queries that already
+        # have chemically valid reverse cuts (SNAr / ether / amide).
+        if not ranked:
             ranked.extend(self._bb_pair_disconnections(smiles))
             hits = self._bb_substructure_hits(smiles, max_hits=12)
             for known in hits[:2]:
@@ -2067,8 +2103,8 @@ class LocalRetrosynthesizer:
             uniq.append(disc)
         ranked = uniq
         if self.prefer_buyable:
-            with_buyable = [d for d in ranked if d.sort_key[3] < 0]
-            without = [d for d in ranked if d.sort_key[3] == 0]
+            with_buyable = [d for d in ranked if d.sort_key[9] < 0]
+            without = [d for d in ranked if d.sort_key[9] == 0]
             ranked = with_buyable[: self.max_disconnections] + without[
                 : max(8, self.max_disconnections // 4)
             ]
@@ -2184,7 +2220,26 @@ class LocalRetrosynthesizer:
                     continue
                 seen_route_sigs.add(sig)
                 routes.append(partial)
-            if sum(1 for r in routes if r.n_steps <= 2 and r.exact) >= self.max_routes_per_mol:
+            n_useful_exact = sum(
+                1
+                for r in routes
+                if r.exact
+                and not any(
+                    rid in self.early_skip_exclude_reactions for rid in r.reaction_ids
+                )
+            )
+            n_short_useful = sum(
+                1
+                for r in routes
+                if r.exact
+                and r.n_steps <= 3
+                and not any(
+                    rid in self.early_skip_exclude_reactions for rid in r.reaction_ids
+                )
+            )
+            if n_short_useful >= self.max_routes_per_mol:
+                break
+            if n_useful_exact >= self.max_routes_per_mol and n_short_useful >= 1:
                 break
             if (
                 self.approximate
