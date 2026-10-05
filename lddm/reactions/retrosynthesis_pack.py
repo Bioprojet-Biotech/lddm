@@ -150,8 +150,23 @@ def infer_required_features(product_smarts: str) -> Tuple[str, ...]:
         or ('](=[O' in prod and ('][N' in prod or '][#7' in prod))
     )
     if has_n_c_o or has_c_o_n:
-        if re.search(r'\[N[^\]]*\]\[C[^\]]*\]\(=[O[^\]]*\]\)\[(?:N|#7)', prod):
-            add('urea')
+        # Urea if the carbonyl is flanked by two N atoms in the product SMARTS.
+        o_idx = prod.find('(=[O')
+        if o_idx == -1:
+            o_idx = prod.find('C(=O)')
+        if o_idx != -1:
+            before = prod[max(0, o_idx - 40) : o_idx]
+            after = prod[o_idx : o_idx + 40]
+            n_before = '[N' in before or '[#7' in before
+            n_after = (
+                '[N' in after[after.find(')') + 1 :]
+                if ')' in after
+                else ('[N' in after or '[#7' in after)
+            )
+            if n_before and n_after:
+                add('urea')
+            else:
+                add('amide')
         else:
             add('amide')
 

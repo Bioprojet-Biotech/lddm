@@ -963,19 +963,39 @@ class LocalRetrosynthesizer:
         except Exception as e:
             logging.warning(f'Could not write prepared BB cache {cache_path}: {e}')
 
+    def _reactions_fingerprint(self) -> str:
+        """Fingerprint of reaction JSON + extras (+ pack if present) for cache invalidation."""
+        from lddm.reactions.retrosynthesis_pack import reaction_sources_fingerprint
+
+        fp = reaction_sources_fingerprint(self.reaction_path)
+        if self.reaction_pack_path.is_file():
+            fp = hashlib.sha256(
+                (fp + '|' + _file_fingerprint(self.reaction_pack_path)).encode()
+            ).hexdigest()
+        return fp
+
     def _load_disconnect_cache(self) -> None:
         if self.disconnect_cache_path is None or not self.disconnect_cache_path.is_file():
             return
         try:
             with open(self.disconnect_cache_path, 'rb') as f:
                 payload = pickle.load(f)
-            if isinstance(payload, dict) and 'disconnects' in payload:
-                for smi, rows in payload['disconnects'].items():
-                    self._disconnect_cache[smi] = _deserialize_disconnects(rows)
+            if not isinstance(payload, dict) or 'disconnects' not in payload:
+                return
+            expected = self._reactions_fingerprint()
+            got = payload.get('reactions_fp')
+            if got is not None and got != expected:
                 logging.info(
-                    f'Loaded {len(self._disconnect_cache)} cached disconnections '
-                    f'from {self.disconnect_cache_path}'
+                    f'Disconnect cache stale vs reactions/pack '
+                    f'({self.disconnect_cache_path}); ignoring'
                 )
+                return
+            for smi, rows in payload['disconnects'].items():
+                self._disconnect_cache[smi] = _deserialize_disconnects(rows)
+            logging.info(
+                f'Loaded {len(self._disconnect_cache)} cached disconnections '
+                f'from {self.disconnect_cache_path}'
+            )
         except Exception as e:
             logging.warning(f'Ignoring disconnect cache {self.disconnect_cache_path}: {e}')
 
@@ -984,7 +1004,10 @@ class LocalRetrosynthesizer:
             return
         # Prefer shared cache contents when present (workers may have added entries).
         disconnects = self._export_disconnect_cache()
-        payload = {'disconnects': disconnects}
+        payload = {
+            'disconnects': disconnects,
+            'reactions_fp': self._reactions_fingerprint(),
+        }
         try:
             self.disconnect_cache_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.disconnect_cache_path.with_suffix(
@@ -1643,6 +1666,9 @@ class LocalRetrosynthesizer:
             return True
         # Small aldehydes (imine partners).
         if n <= 12 and mol.HasSubstructMatch(Chem.MolFromSmarts('[CH]=O')):
+            return True
+        # Isocyanates from cyclic-urea opens (intramolecular NCO + amine).
+        if mol.HasSubstructMatch(Chem.MolFromSmarts('[N]=C=O')):
             return True
         # Tiny heteroarenes (pyridine etc.) when not already trivial-seeded.
         if n <= 8 and mol.GetNumHeavyAtoms() <= 8:
@@ -2351,8 +2377,22 @@ class LocalRetrosynthesizer:
                         exact_partials.append(enriched)
                     else:
                         approx_partials.append(enriched)
-            # Any acceptable hit at this depth → do not deepen further.
-            if exact_partials or approx_partials:
+            # Stop early only when we already have a good shallow hit that does
+            # not rely on excluded templates (default: retro_cc_wurtz). Pure
+            # Wurtz / junk shallow hits should not block deeper chemistry
+            # (e.g. acyliminium + cyclic urea).
+            good_exact = [
+                p
+                for p in exact_partials
+                if not any(
+                    rid in self.early_skip_exclude_reactions for rid in p.reaction_ids
+                )
+            ]
+            if good_exact and depth >= 2:
+                break
+            if (exact_partials or approx_partials) and depth >= self.max_depth:
+                break
+            if approx_partials and not exact_partials and depth >= 2:
                 break
 
         partials = exact_partials if exact_partials else approx_partials
