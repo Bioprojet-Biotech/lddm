@@ -385,10 +385,12 @@ def setup_logging(verbose=False):
     logging.getLogger().setLevel(level)
 
 def disable_rdkit_logging():
-    # RDLogger.DisableLog('rdApp.*')
-    RDLogger.DisableLog('rdApp.info')
-    RDLogger.DisableLog('rdApp.error')
-    RDLogger.DisableLog('rdApp.warning')
+    """Mute RDKit C++/Python logs (invalid SMARTS/SMILES noise during retro)."""
+    RDLogger.DisableLog('rdApp.*')
+    try:
+        rdBase.DisableLog('rdApp.*')
+    except Exception:
+        pass
 
 class quiet_rdkit:
     """Context manager for temporarily disabling rdkit logging."""

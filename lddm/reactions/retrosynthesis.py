@@ -21,8 +21,14 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
-from rdkit import Chem
+from rdkit import Chem, RDLogger, rdBase
 from rdkit.Chem import AllChem, DataStructs, rdChemReactions
+
+RDLogger.DisableLog('rdApp.*')
+try:
+    rdBase.DisableLog('rdApp.*')
+except Exception:
+    pass
 
 from lddm.reactions.bb_catalog import infer_provider, provider_rank
 from lddm.reactions.chemical_space_format import reaction_molecularity
@@ -150,6 +156,11 @@ def _deserialize_disconnects(rows: Sequence[dict]) -> List['_Disconnect']:
 
 def _init_synth_worker(config: dict, shared_disconnect_cache=None) -> None:
     global _WORKER_SYNTH, _SHARED_DISCONNECT_CACHE
+    RDLogger.DisableLog('rdApp.*')
+    try:
+        rdBase.DisableLog('rdApp.*')
+    except Exception:
+        pass
     _SHARED_DISCONNECT_CACHE = shared_disconnect_cache
     _WORKER_SYNTH = LocalRetrosynthesizer(**config)
     _WORKER_SYNTH._shared_disconnect_cache = shared_disconnect_cache

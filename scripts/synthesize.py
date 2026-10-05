@@ -22,7 +22,7 @@ from lddm.reactions.procedure_enrichment import (
 )
 from lddm.reactions.render_pathways import write_embedded_retrosynthesis_html
 from lddm.reactions.retrosynthesis import LocalRetrosynthesizer, routes_to_dataframe
-from lddm.utils import merge_args_and_yaml, set_default, setup_logging
+from lddm.utils import disable_rdkit_logging, merge_args_and_yaml, set_default, setup_logging
 
 
 def _load_smiles(args) -> list[str]:
@@ -212,6 +212,8 @@ def main():
 
     set_default(cfg, 'verbose', False)
     setup_logging(cfg.verbose)
+    if not cfg.verbose:
+        disable_rdkit_logging()
     set_default(cfg, 'reaction_path', 'data/synspace/reactions.json')
     set_default(cfg, 'building_blocks_path', 'data/synspace/building_blocks.pkl')
     set_default(cfg, 'reaction_to_compound_path', 'data/synspace/reaction_to_building_blocks.pkl')
